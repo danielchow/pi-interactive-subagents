@@ -193,21 +193,6 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 
       let surface: string | null = null;
 
-      // Helper to emit progress updates during setup and polling
-      const emitProgress = (phase: string, extra?: Record<string, unknown>) => {
-        onUpdate?.({
-          content: [{ type: "text", text: phase }],
-          details: {
-            name: params.name,
-            interactive,
-            task: params.task,
-            startTime,
-            phase,
-            ...extra,
-          },
-        });
-      };
-
       try {
 
         // Record existing session files BEFORE spawning so we can identify
@@ -216,8 +201,6 @@ export default function subagentsExtension(pi: ExtensionAPI) {
         const existingSessionFiles = new Set(
           readdirSync(sessionDir).filter((f) => f.endsWith(".jsonl"))
         );
-
-        emitProgress("Creating terminal…");
 
         // Create cmux surface
         surface = createSurface(params.name);
@@ -242,7 +225,6 @@ export default function subagentsExtension(pi: ExtensionAPI) {
           `${roleBlock}\n\n${modeHint}\n\n${params.task}\n\n${summaryInstruction}`;
 
         const contextBytes = Buffer.byteLength(fullTask, "utf8");
-        emitProgress(`Preparing context (${formatBytes(contextBytes)})…`);
 
         // Build pi command
         const parts: string[] = ["pi"];
@@ -252,11 +234,8 @@ export default function subagentsExtension(pi: ExtensionAPI) {
         // Default: fresh session — avoids overwhelming the agent in long sessions.
         let forkedSessionFile: string | null = null;
         if (params.fork) {
-          emitProgress("Forking session…");
           const { copySessionFile } = await import("./session.ts");
           forkedSessionFile = copySessionFile(sessionFile, dirname(sessionFile));
-          const forkSize = statSync(forkedSessionFile).size;
-          emitProgress(`Session forked (${formatBytes(forkSize)})…`);
           parts.push("--session", shellEscape(forkedSessionFile));
         } else {
           parts.push("--session-dir", shellEscape(dirname(sessionFile)));
@@ -296,9 +275,6 @@ export default function subagentsExtension(pi: ExtensionAPI) {
             parts.push(shellEscape(`/skill:${skill}`));
           }
         }
-        if (skillNames.length > 0) {
-          emitProgress(`Loading skills: ${skillNames.join(", ")}…`);
-        }
 
         const taskFile = join(tmpdir(), `subagent-task-${Date.now()}.md`);
         writeFileSync(taskFile, fullTask, "utf8");
@@ -307,10 +283,29 @@ export default function subagentsExtension(pi: ExtensionAPI) {
         const piCommand = parts.join(" ");
         const command = `${piCommand}; rm -f ${shellEscape(taskFile)}; echo '__SUBAGENT_DONE_'${exitStatusVar()}'__'`;
 
-        emitProgress("Starting session…");
-
         // Send to surface
         sendCommand(surface, command);
+
+        // Emit initial progress and yield to the event loop so pi can
+        // render it before we enter the blocking poll loop.
+        // Without this await, process.nextTick renders never fire because
+        // the setup code is fully synchronous.
+        const contextDesc = params.fork
+          ? `forked session + ${formatBytes(contextBytes)} task`
+          : `${formatBytes(contextBytes)} context`;
+        const skillDesc = skillNames.length > 0 ? ` · skills: ${skillNames.join(", ")}` : "";
+        onUpdate?.({
+          content: [{ type: "text", text: "starting…" }],
+          details: {
+            name: params.name,
+            interactive,
+            task: params.task,
+            startTime,
+            phase: "starting",
+            contextDesc: `${contextDesc}${skillDesc}`,
+          },
+        });
+        await new Promise<void>((resolve) => setTimeout(resolve, 0));
 
         // Poll for exit
         const interval = interactive ? 3000 : 1000;
@@ -345,6 +340,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
                   task: params.task,
                   startTime,
                   phase: "loading",
+                  contextDesc: `${contextDesc}${skillDesc}`,
                 },
               });
             }
@@ -452,20 +448,21 @@ export default function subagentsExtension(pi: ExtensionAPI) {
         const phase: string | undefined = details?.phase;
         const sessionEntries: number | undefined = details?.sessionEntries;
         const sessionBytes: number | undefined = details?.sessionBytes;
-
-        // Setup phases (before polling starts) — show phase directly
-        if (phase && phase !== "running" && phase !== "loading") {
-          return new Text(theme.fg("dim", phase), 0, 0);
-        }
+        const contextDesc: string | undefined = details?.contextDesc;
 
         const elapsedText = startTime
           ? formatElapsed(Math.floor((Date.now() - startTime) / 1000))
-          : "running…";
+          : "…";
 
-        // Build progress line
+        // Build progress line with phase-appropriate info
         let progressParts: string[] = [elapsedText];
-        if (phase === "loading") {
-          progressParts.push("loading…");
+        if (phase === "starting" || phase === "loading") {
+          // Before the session file appears — show context size so user
+          // knows work is happening
+          if (contextDesc) {
+            progressParts.push(contextDesc);
+          }
+          progressParts.push(phase === "starting" ? "starting…" : "loading…");
         } else if (sessionEntries != null && sessionBytes != null) {
           progressParts.push(`${sessionEntries} messages (${formatBytes(sessionBytes)})`);
         }
