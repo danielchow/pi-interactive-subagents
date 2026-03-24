@@ -1,12 +1,29 @@
 # pi-interactive-subagents
 
-Interactive subagents for [pi](https://github.com/badlogic/pi-mono) - spawn, orchestrate, and manage sub-agent sessions in multiplexer panes.
+Async subagents for [pi](https://github.com/badlogic/pi-mono) — spawn, orchestrate, and manage sub-agent sessions in multiplexer panes. **Fully non-blocking** — the main agent keeps working while subagents run in the background.
 
 
 https://github.com/user-attachments/assets/c2dafe55-e4a6-4bcc-afac-273e3f05bdca
 
 
-This package gives pi the ability to delegate work to specialized sub-agents that run in their own terminal sessions. A main orchestrator session spawns scouts, planners, workers, and reviewers, each visible in a side-by-side split. The user can watch progress in real-time, interact with interactive agents, and get summaries when autonomous agents finish.
+## How It Works
+
+Call `subagent()` and it **returns immediately**. The sub-agent runs in its own terminal pane. A live widget above the input shows all running agents with elapsed time and progress. When a sub-agent finishes, its result is **steered back** into the main session as an async notification — triggering a new turn so the agent can process it.
+
+```
+╭─ Subagents ──────────────────────── 2 running ─╮
+│ 00:23  Scout: Auth (scout)    8 msgs (5.1KB)   │
+│ 00:45  Scout: DB (scout)     12 msgs (9.3KB)   │
+╰─────────────────────────────────────────────────╯
+```
+
+For parallel execution, just call `subagent` multiple times — they all run concurrently:
+
+```typescript
+subagent({ name: "Scout: Auth", agent: "scout", task: "Analyze auth module" })
+subagent({ name: "Scout: DB", agent: "scout", task: "Map database schema" })
+// Both return immediately, results steer back independently
+```
 
 ## Install
 
@@ -35,20 +52,19 @@ Optional: set `PI_SUBAGENT_MUX=cmux|tmux|zellij` to force a specific backend.
 
 ### Extensions
 
-**Subagents** - 5 tools + 3 commands for spawning and managing sub-agents:
+**Subagents** — 4 tools + 3 commands:
 
 | Tool | Description |
 |------|-------------|
-| `subagent` | Spawn a sub-agent in a dedicated multiplexer pane |
-| `parallel_subagents` | Run multiple autonomous sub-agents concurrently with tiled layout |
+| `subagent` | Spawn a sub-agent in a dedicated multiplexer pane (async — returns immediately) |
 | `subagents_list` | List available agent definitions |
 | `set_tab_title` | Update tab/window title to show progress |
-| `subagent_resume` | Resume a previous sub-agent session |
+| `subagent_resume` | Resume a previous sub-agent session (async) |
 
 | Command | Description |
 |---------|-------------|
 | `/plan` | Start a full planning workflow |
-| `/iterate` | Fork into an interactive subagent for quick fixes |
+| `/iterate` | Fork into a subagent for quick fixes |
 | `/subagent <agent> <task>` | Spawn a named agent directly |
 
 **Session Artifacts** — 2 tools for session-scoped file storage:
@@ -60,11 +76,9 @@ Optional: set `PI_SUBAGENT_MUX=cmux|tmux|zellij` to force a specific backend.
 
 ### Bundled Agents
 
-Five agent definitions ship with the package. Each has a specific role, model, and system prompt:
-
 | Agent | Model | Role |
 |-------|-------|------|
-| **planner** | Opus (medium thinking) | Interactive brainstorming — clarifies requirements, explores approaches, writes plans, creates todos |
+| **planner** | Opus (medium thinking) | Brainstorming — clarifies requirements, explores approaches, writes plans, creates todos |
 | **scout** | Haiku | Fast codebase reconnaissance — maps files, patterns, conventions |
 | **worker** | Sonnet | Implements tasks from todos — writes code, runs tests, makes polished commits |
 | **reviewer** | Opus (medium thinking) | Reviews code for bugs, security issues, correctness |
@@ -74,108 +88,53 @@ Agent discovery follows priority: **project-local** (`.pi/agents/`) > **global**
 
 ---
 
-## The `/plan` Workflow
-
-The `/plan` command orchestrates a full planning-to-implementation pipeline. It's the primary way to build features with subagents.
+## Async Subagent Flow
 
 ```
-/plan Add a dark mode toggle to the settings page
+1. Agent calls subagent()         → returns immediately ("started")
+2. Sub-agent runs in mux pane     → widget shows live progress
+3. User keeps chatting             → main session fully interactive
+4. Sub-agent finishes              → result steered back as interrupt
+5. Main agent processes result     → continues with new context
 ```
 
-### How It Works
+Multiple subagents run concurrently — each steers its result back independently as it finishes. The live widget above the input tracks all running agents:
 
 ```
-┌─────────────────────────────────────────────────────┐
-│  Phase 1: Investigation (main session)              │
-│  Quick codebase scan — file structure, patterns     │
-├─────────────────────────────────────────────────────┤
-│  Phase 2: Planning (interactive subagent)           │
-│  User collaborates with the planner agent           │
-│  → Clarify requirements                             │
-│  → Explore approaches                               │
-│  → Validate design                                  │
-│  → Write plan artifact                              │
-│  → Create scoped todos                              │
-├─────────────────────────────────────────────────────┤
-│  Phase 3: Review Plan (main session)                │
-│  Confirm todos, adjust if needed                    │
-├─────────────────────────────────────────────────────┤
-│  Phase 4: Execute (sequential workers)              │
-│  Scout gathers context → Workers implement todos    │
-│  Each worker: claim → implement → test → commit     │
-├─────────────────────────────────────────────────────┤
-│  Phase 5: Review (reviewer subagent)                │
-│  Code review with priority triage (P0–P3)           │
-│  Fix critical issues, skip nits                     │
-└─────────────────────────────────────────────────────┘
+╭─ Subagents ──────────────────────── 3 running ─╮
+│ 01:23  Scout: Auth (scout)      15 msgs (12KB) │
+│ 00:45  Researcher (researcher)   8 msgs (6KB)  │
+│ 00:12  Scout: DB (scout)             starting…  │
+╰─────────────────────────────────────────────────╯
 ```
 
-**Phase 1** — The main session does a quick investigation (30–60 seconds) to gather context. For larger codebases, it spawns a scout agent first.
-
-**Phase 2** — An interactive planner opens in a side-by-side terminal split. The planner walks through requirements, proposes approaches, validates the design section by section, and produces a plan artifact + scoped todos. The user collaborates directly — answering questions, picking approaches, confirming design decisions. When done, Ctrl+D returns to the main session.
-
-**Phase 3** — The main session reviews the plan and todos. The user can adjust before execution begins.
-
-**Phase 4** — A scout gathers implementation context, then workers execute todos one at a time. Each worker claims a todo, implements it, runs tests, makes a polished commit, and closes the todo. Workers run sequentially to avoid git conflicts.
-
-**Phase 5** — A reviewer examines all changes, producing a prioritized report. P0/P1 issues get fixed immediately by additional workers. P2/P3 items are noted or skipped.
-
-Throughout the workflow, tab/window titles update to show current phase:
-
-```
-🔍 Investigating: dark mode    →    💬 Planning: dark mode
-→    🔨 Executing: 1/3    →    🔨 Executing: 2/3
-→    🔎 Reviewing: dark mode    →    ✅ Done: dark mode
-```
+Completion messages render with a colored background and are expandable with `Ctrl+O` to show the full summary and session file path.
 
 ---
 
-## The `/iterate` Workflow
-
-For quick, focused work — bugfixes, small changes, ad-hoc tasks — without polluting the main session's context.
-
-```
-/iterate Fix the off-by-one error in the pagination logic
-```
-
-This forks the current session into an interactive subagent. The sub-agent has full conversation context (it knows everything discussed so far) and opens in a side-by-side terminal. Make the fix, verify it, and Ctrl+D to return. The main session gets a summary of what was done.
-
-Use `/iterate` when:
-- You spot a bug during a larger workflow
-- You want to try something without cluttering the main session
-- You need hands-on work with full context
-
----
-
-## Direct Subagent Spawning
-
-For fine-grained control, spawn agents directly:
-
-```
-/subagent scout Analyze the authentication module
-/subagent worker Implement TODO-abc123
-/subagent reviewer Review the last 3 commits
-```
-
-Or let the LLM use the `subagent` tool with full parameter control:
+## Spawning Subagents
 
 ```typescript
-subagent({
-  name: "Scout",
-  agent: "scout",
-  interactive: false,
-  task: "Map the database schema and query patterns"
-})
+// Named agent with defaults from agent definition
+subagent({ name: "Scout", agent: "scout", task: "Analyze the codebase..." })
+
+// Fork — sub-agent gets full conversation context
+subagent({ name: "Iterate", fork: true, task: "Fix the bug where..." })
+
+// Override agent defaults
+subagent({ name: "Worker", agent: "worker", model: "anthropic/claude-haiku-4-5", task: "Quick fix..." })
+
+// Custom working directory
+subagent({ name: "Designer", agent: "game-designer", cwd: "agents/game-designer", task: "..." })
 ```
 
 ### Parameters
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `name` | string | required | Display name (shown in pane title/tab) |
+| `name` | string | required | Display name (shown in widget and pane title) |
 | `task` | string | required | Task prompt for the sub-agent |
 | `agent` | string | — | Load defaults from agent definition |
-| `interactive` | boolean | `true` | User collaborates vs. autonomous |
 | `fork` | boolean | `false` | Copy current session for full context |
 | `model` | string | — | Override agent's default model |
 | `systemPrompt` | string | — | Append to system prompt |
@@ -185,61 +144,46 @@ subagent({
 
 ---
 
-## Parallel Subagents
+## The `/plan` Workflow
 
-The `parallel_subagents` tool runs multiple autonomous sub-agents concurrently with a single tool call. Each agent gets its own pane in a tiled layout, and progress updates stream in as each agent completes.
-
-```typescript
-parallel_subagents({
-  agents: [
-    { name: "Scout: Auth", agent: "scout", task: "Analyze the authentication module" },
-    { name: "Scout: Database", agent: "scout", task: "Map the database schema and query patterns" },
-    { name: "Scout: API", agent: "scout", task: "Document the REST API endpoints" },
-  ]
-})
-```
-
-### Terminal Layout
-
-Parallel agents are arranged in a tiled layout next to the orchestrator:
+The `/plan` command orchestrates a full planning-to-implementation pipeline.
 
 ```
-┌──────────────────┬──────────────────┐
-│                  │  Scout: Auth     │
-│                  ├──────────────────┤
-│   Orchestrator   │  Scout: Database │
-│                  ├──────────────────┤
-│                  │  Scout: API      │
-└──────────────────┴──────────────────┘
+/plan Add a dark mode toggle to the settings page
 ```
 
-The first agent splits right from the orchestrator (side-by-side). Each subsequent agent splits down from the previous one (stacked vertically). All terminals are visible simultaneously.
-
-### Progress Rendering
-
-Unlike separate `subagent` calls, `parallel_subagents` is a single tool call — so progress updates render immediately as each agent finishes:
-
 ```
-1/3 done · 45s elapsed
-  ✓ Scout: Auth — done
-  ⟳ Scout: Database — 32s · 12 msgs (8.2KB)
-  ⟳ Scout: API — 28s · 8 msgs (5.1KB)
+Phase 1: Investigation    → Quick codebase scan
+Phase 2: Planning         → Interactive planner subagent (user collaborates)
+Phase 3: Review Plan      → Confirm todos, adjust if needed
+Phase 4: Execute          → Scout + sequential workers implement todos
+Phase 5: Review           → Reviewer subagent checks all changes
 ```
 
-### Good Candidates for Parallelism
+Tab/window titles update to show current phase:
 
-- Multiple scouts gathering context from different parts of the codebase
-- Independent workers on non-overlapping tasks (be careful with git conflicts)
-- A scout + a researcher running simultaneously
-- Parallel research on different topics
+```
+🔍 Investigating: dark mode → 💬 Planning: dark mode
+→ 🔨 Executing: 1/3 → 🔎 Reviewing → ✅ Done
+```
 
-All agents run autonomously (`interactive: false` is enforced). Each parameter accepts the same options as `subagent` except `interactive` and `fork`.
+---
+
+## The `/iterate` Workflow
+
+For quick, focused work without polluting the main session's context.
+
+```
+/iterate Fix the off-by-one error in the pagination logic
+```
+
+This forks the current session into a subagent with full conversation context. Make the fix, verify it, and exit to return. The main session gets a summary of what was done.
 
 ---
 
 ## Custom Agents
 
-Create your own agent definitions. Place a `.md` file in `.pi/agents/` (project) or `~/.pi/agent/agents/` (global):
+Place a `.md` file in `.pi/agents/` (project) or `~/.pi/agent/agents/` (global):
 
 ```markdown
 ---
@@ -256,8 +200,6 @@ spawning: false
 You are a specialized agent that does X...
 ```
 
-The frontmatter configures the agent defaults. The body becomes the system prompt.
-
 ### Frontmatter Reference
 
 | Field | Type | Description |
@@ -266,7 +208,7 @@ The frontmatter configures the agent defaults. The body becomes the system promp
 | `description` | string | Shown in `subagents_list` output |
 | `model` | string | Default model (e.g. `anthropic/claude-sonnet-4-6`) |
 | `thinking` | string | Thinking level: `minimal`, `medium`, `high` |
-| `tools` | string | Comma-separated **native pi tools only**: `read`, `bash`, `edit`, `write`, `grep`, `find`, `ls`. Non-native tool names are silently ignored. To control extension tools, use `deny-tools` or `spawning` instead. |
+| `tools` | string | Comma-separated **native pi tools only**: `read`, `bash`, `edit`, `write`, `grep`, `find`, `ls` |
 | `skills` | string | Comma-separated skill names to auto-load |
 | `spawning` | boolean | Set `false` to deny all subagent-spawning tools |
 | `deny-tools` | string | Comma-separated extension tool names to deny |
@@ -276,19 +218,11 @@ The frontmatter configures the agent defaults. The body becomes the system promp
 
 ## Tool Access Control
 
-By default, every sub-agent has access to all extension tools — including the ability to spawn further sub-agents. This can lead to unbounded recursion and wasted tokens (a researcher spawning another researcher, a worker spawning workers, etc.).
-
-> **Important:** The `tools` field in agent frontmatter only controls **native pi builtins** (`read`, `bash`, `edit`, `write`, `grep`, `find`, `ls`). It maps to pi's `--tools` CLI flag. Putting extension tool names (like `subagent`, `set_tab_title`, etc.) in `tools` has no effect — they are silently filtered out. To remove extension tools from a sub-agent, use `spawning: false` and/or `deny-tools` instead.
-
-Two frontmatter fields control which **extension** tools are available in a sub-agent session:
+By default, every sub-agent can spawn further sub-agents. Control this with frontmatter:
 
 ### `spawning: false`
 
-Shorthand that denies all four spawning tools at once:
-- `subagent`
-- `parallel_subagents`
-- `subagents_list`
-- `subagent_resume`
+Denies all spawning tools (`subagent`, `subagents_list`, `subagent_resume`):
 
 ```yaml
 ---
@@ -297,35 +231,16 @@ spawning: false
 ---
 ```
 
-The agent can still do its work — it just can't spawn other agents.
-
 ### `deny-tools`
 
-Fine-grained control over individual tools. Comma-separated list of extension tool names to deny:
+Fine-grained control over individual extension tools:
 
 ```yaml
 ---
 name: focused-agent
-deny-tools: subagent, parallel_subagents, set_tab_title
+deny-tools: subagent, set_tab_title
 ---
 ```
-
-### Combining Both
-
-Both fields can be used together. The denied sets are merged:
-
-```yaml
----
-name: locked-down-agent
-spawning: false
-deny-tools: set_tab_title
----
-# Denies: subagent, parallel_subagents, subagents_list, subagent_resume, set_tab_title
-```
-
-### How It Works
-
-When a sub-agent is spawned, the extension resolves the denied tools from the agent's frontmatter and passes them as a `PI_DENY_TOOLS` environment variable to the child process. The extension checks this variable at startup and skips registering the denied tools — they never appear in the agent's tool list.
 
 ### Recommended Configuration
 
@@ -341,16 +256,7 @@ When a sub-agent is spawned, the extension resolves the denied tools from the ag
 
 ## Role Folders
 
-The `cwd` parameter lets sub-agents start in a specific directory. When pi launches in a folder, it auto-discovers that folder's local configuration:
-
-- `.pi/agents/` — local agent definitions
-- `CLAUDE.md`, `.cursorrules`, etc. — project conventions / system prompt
-- `.pi/skills/` — local skills
-- `.pi/extensions/` — local extensions
-
-This makes it possible to create **role-specific folders** where each folder defines a completely different agent persona — with its own system prompt, tools, skills, and conventions.
-
-### Example: Game Design Team
+The `cwd` parameter lets sub-agents start in a specific directory with its own configuration:
 
 ```
 project/
@@ -359,96 +265,48 @@ project/
 │   │   └── CLAUDE.md          ← "You are a game designer..."
 │   ├── sre/
 │   │   ├── CLAUDE.md          ← "You are an SRE specialist..."
-│   │   └── .pi/
-│   │       └── skills/
-│   │           └── runbooks/  ← SRE-specific skills
+│   │   └── .pi/skills/        ← SRE-specific skills
 │   └── narrative/
 │       └── CLAUDE.md          ← "You are a narrative designer..."
 ```
 
-Spawn them:
-
 ```typescript
-// Game designer — picks up agents/game-designer/CLAUDE.md
-subagent({
-  name: "Game Designer",
-  interactive: true,
-  cwd: "agents/game-designer",
-  task: "Help me design the combat system"
-})
-
-// SRE — picks up agents/sre/CLAUDE.md + local skills
-subagent({
-  name: "SRE",
-  interactive: false,
-  cwd: "agents/sre",
-  task: "Review our deployment pipeline for single points of failure"
-})
+subagent({ name: "Game Designer", cwd: "agents/game-designer", task: "Design the combat system" })
+subagent({ name: "SRE", cwd: "agents/sre", task: "Review deployment pipeline" })
 ```
 
-### `cwd` in Agent Definitions
-
-You can also set a default `cwd` in the agent frontmatter, so every time that agent is spawned it starts in the right folder:
+Set a default `cwd` in agent frontmatter:
 
 ```yaml
 ---
 name: game-designer
-description: Game design specialist
-model: anthropic/claude-sonnet-4-6
-tools: read, write
 cwd: ./agents/game-designer
 spawning: false
 ---
-
-You are a game designer...
 ```
-
-Then simply:
-
-```typescript
-subagent({ name: "Game Designer", agent: "game-designer", task: "..." })
-// Automatically starts in ./agents/game-designer/
-```
-
-The `cwd` parameter on the tool call always overrides the agent default.
-
-### How It Works
-
-The `cwd` is resolved relative to the project root (or used as-is if absolute). Before launching the pi process, the extension prepends `cd <resolved-path> &&` to the command. Pi then starts in that directory and discovers its local configuration normally.
 
 ---
 
 ## Tools Widget
 
-Every sub-agent session displays a compact tools widget above the editor, showing available and denied tools at a glance. This makes it immediately clear what capabilities each agent has.
-
-- **Collapsed** (default): one-line summary — tool count + denied count
-- **Expanded** (`Ctrl+J`): full list of all tools and denied tools
-- Press `Ctrl+J` again to collapse
+Every sub-agent session displays a compact tools widget showing available and denied tools. Toggle with `Ctrl+J`:
 
 ```
-┌─────────────────────────────────────────────────────┐
-│ Subagent Tools — 12 tools · 4 denied  (Ctrl+J)     │  ← collapsed
-└─────────────────────────────────────────────────────┘
-
-┌─────────────────────────────────────────────────────┐
-│ Subagent Tools — 12 available  (Ctrl+J to collapse) │  ← expanded
-│ read, bash, edit, write, todo, ...                  │
-│ denied: subagent, parallel_subagents, ...           │
-└─────────────────────────────────────────────────────┘
+[scout] — 12 tools · 4 denied  (Ctrl+J)              ← collapsed
+[scout] — 12 available  (Ctrl+J to collapse)          ← expanded
+  read, bash, edit, write, todo, ...
+  denied: subagent, subagents_list, ...
 ```
 
 ---
 
 ## Requirements
 
-- [pi](https://github.com/badlogic/pi-mono) - the coding agent
+- [pi](https://github.com/badlogic/pi-mono) — the coding agent
 - One supported multiplexer:
   - [cmux](https://github.com/manaflow-ai/cmux)
   - [tmux](https://github.com/tmux/tmux)
   - [zellij](https://zellij.dev)
-
-Start pi inside one of them:
 
 ```bash
 cmux pi
